@@ -1,0 +1,16 @@
+FROM node:18-alpine
+
+WORKDIR /usr/src/app
+
+COPY package*.json ./
+RUN npm ci --only=production
+
+COPY . .
+
+EXPOSE 3000
+
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nextjs -u 1001
+USER nextjs
+
+CMD ["npm", "start"]

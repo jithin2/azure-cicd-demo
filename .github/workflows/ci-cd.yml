@@ -1,0 +1,108 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CONTAINER_NAME: azure-cicd-demo
+  RESOURCE_GROUP: rg-devops-learning
+  ACI_NAME: aci-devops-demo
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run tests
+      run: npm test
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Login to Azure Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+        username: ${{ secrets.REGISTRY_USERNAME }}
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{ secrets.REGISTRY_LOGIN_SERVER }}/${{ env.CONTAINER_NAME }}:latest
+          ${{ secrets.REGISTRY_LOGIN_SERVER }}/${{ env.CONTAINER_NAME }}:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: |
+          {
+            "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+            "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+            "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+            "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
+          }
+
+    - name: Delete existing container (if exists)
+      run: |
+        az container delete \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --name ${{ env.ACI_NAME }} \
+          --yes || true
+
+    - name: Deploy to Azure Container Instances
+      run: |
+        az container create \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --name ${{ env.ACI_NAME }} \
+          --image ${{ secrets.REGISTRY_LOGIN_SERVER }}/${{ env.CONTAINER_NAME }}:latest \
+          --registry-login-server ${{ secrets.REGISTRY_LOGIN_SERVER }} \
+          --registry-username ${{ secrets.REGISTRY_USERNAME }} \
+          --registry-password ${{ secrets.REGISTRY_PASSWORD }} \
+          --dns-name-label azure-cicd-demo-${{ github.run_number }} \
+          --ports 3000 \
+          --cpu 0.5 \
+          --memory 1 \
+          --restart-policy OnFailure \
+          --environment-variables NODE_ENV=production
+
+    - name: Get deployment URL
+      run: |
+        echo "⏳ Waiting for container to be ready..."
+        sleep 30
+        FQDN=$(az container show --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.ACI_NAME }} --query ipAddress.fqdn -o tsv)
+        echo "🚀 Application deployed successfully!"
+        echo "🌐 URL: http://$FQDN:3000"
+        echo "### 🎉 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+        echo "**Application URL:** http://$FQDN:3000" >> $GITHUB_STEP_SUMMARY
+        echo "**Environment:** Production" >> $GITHUB_STEP_SUMMARY
+        echo "**Build:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
